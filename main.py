@@ -5,6 +5,7 @@ from io import BytesIO
 from pypdf import PdfReader
 from supabase import create_client, Client
 
+# Silenzia i warning secondari di pypdf
 logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -17,7 +18,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 BUCKET_NAME = "documents"
 TARGET_TABLE = "component_proposals"
 
-# Dizionario con frasi chiave composte e punteggi specifici
+# Regole di categorizzazione e frasi chiave
 CATEGORY_RULES = [
     {
         "name": "Belvedere - main hall",
@@ -62,6 +63,29 @@ CATEGORY_RULES = [
 ]
 
 
+def extract_snippet(text: str, keyword: str, max_words: int = 40) -> str:
+    """Estrae il contesto/frase esatta che circonda la parola chiave identificata."""
+    # Pulizia di spazi multipli e a capo
+    clean_text = re.sub(r"\s+", " ", text)
+    pattern = re.compile(
+        r"([^.!?]*?\b" + re.escape(keyword) + r"\b[^.!?]*[.!?])", re.IGNORECASE
+    )
+    match = pattern.search(clean_text)
+
+    if match:
+        snippet = match.group(0).strip()
+        return snippet
+
+    # Fallback: se non trova la punteggiatura di fine frase, prende una porzione di testo attorno
+    idx = clean_text.lower().find(keyword.lower())
+    if idx != -1:
+        start = max(0, idx - 100)
+        end = min(len(clean_text), idx + 150)
+        return f"...{clean_text[start:end].strip()}..."
+
+    return "Estratto non disponibile."
+
+
 def extract_and_analyze_pdf(file_path: str) -> dict:
     response = supabase.storage.from_(BUCKET_NAME).download(file_path)
     pdf_file = BytesIO(response)
@@ -69,11 +93,10 @@ def extract_and_analyze_pdf(file_path: str) -> dict:
 
     page_scores = []
 
-    # Analizza ogni pagina e calcola la rilevanza
     for idx, page in enumerate(reader.pages):
         page_num = idx + 1
 
-        # Salta le prime 2 pagine per evitare solitamente copertine/indici sintetici
+        # Salta le prime 2 pagine per evitare solitamente copertine/indici
         if page_num < 3 and len(reader.pages) > 5:
             continue
 
@@ -82,24 +105,25 @@ def extract_and_analyze_pdf(file_path: str) -> dict:
 
         for rule in CATEGORY_RULES:
             for kw in rule["keywords"]:
-                # Conta quante volte compare la frase chiave nella pagina
                 matches = len(re.findall(r"\b" + re.escape(kw) + r"\b", text_lower))
                 if matches > 0:
+                    snippet = extract_snippet(text, kw)
                     page_scores.append(
                         {
                             "page": str(page_num),
                             "rule": rule,
                             "keyword": kw,
                             "score": matches,
+                            "snippet": snippet,
                         }
                     )
 
-    # Se abbiamo trovato delle corrispondenze, prendiamo quella con il punteggio piu' alto
     if page_scores:
-        # Ordina per punteggio decrescente
+        # Seleziona il match con il punteggio/frequenza piu' alto
         best_match = max(page_scores, key=lambda x: x["score"])
         rule = best_match["rule"]
         page_str = best_match["page"]
+        snippet_str = best_match["snippet"]
 
         return {
             "proposed_space_name": rule["name"],
@@ -108,9 +132,9 @@ def extract_and_analyze_pdf(file_path: str) -> dict:
             "ai_explanation": f"Identificato '{best_match['keyword']}' con alta rilevanza a pagina {page_str}.",
             "confidence": rule["confidence"],
             "source_page_number": page_str,
+            "extracted_text_snippet": snippet_str,
         }
 
-    # Se nessuna regola specifica e' stata attivata
     return {
         "proposed_space_name": "Complesso Belvedere San Leucio",
         "space_category": "Spazio aperto",
@@ -118,6 +142,7 @@ def extract_and_analyze_pdf(file_path: str) -> dict:
         "ai_explanation": "Contenuto generale sul complesso monumentale senza riferimenti specifici ad ambienti identificati.",
         "confidence": 0.80,
         "source_page_number": None,
+        "extracted_text_snippet": "Nessuna frase chiave rilevata nel testo.",
     }
 
 
@@ -145,7 +170,7 @@ def process_pending_proposals():
             review_status = proposal.get("review_status")
 
             if review_status == "to_review":
-                print(f"-> Analisi avanzata PDF: {file_path}")
+                print(f"-> Estrazione testo ed evidenze per: {file_path}")
                 try:
                     analysis = extract_and_analyze_pdf(file_path)
 
@@ -156,6 +181,7 @@ def process_pending_proposals():
                         "ai_explanation": analysis["ai_explanation"],
                         "confidence": analysis["confidence"],
                         "source_page_number": analysis["source_page_number"],
+                        "extracted_text_snippet": analysis["extracted_text_snippet"],
                         "review_status": "reviewed",
                     }
 
@@ -163,7 +189,7 @@ def process_pending_proposals():
                         "id", proposal_id
                     ).execute()
                     print(
-                        f"   [OK] Pagina individuata: {analysis['source_page_number']} | Categoria: {analysis['proposed_space_name']}"
+                        f"   [OK] Pagina: {analysis['source_page_number']} | Snippet: \"{analysis['extracted_text_snippet'][:60]}...\""
                     )
                 except Exception as e:
                     print(f"   [ERRORE] {file_path}: {e}")
