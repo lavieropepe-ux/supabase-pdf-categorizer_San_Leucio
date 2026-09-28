@@ -3,11 +3,9 @@ from io import BytesIO
 from pypdf import PdfReader
 from supabase import create_client, Client
 
-# Recupera i segreti impostati su GitHub Actions
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
-# Controllo di sicurezza sulle variabili d'ambiente
 if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
     raise ValueError(
         f"ERRORE: Variabili d'ambiente mancanti! "
@@ -37,7 +35,6 @@ def get_pdf_text_from_storage(file_path: str) -> str:
 
 def analyze_and_categorize(text: str) -> dict:
     """Analizza il testo del documento inerente al complesso di San Leucio
-
     e determina le informazioni spaziali ed edilizie.
     """
     text_lower = text.lower()
@@ -125,8 +122,13 @@ def process_pending_proposals():
         proposal_id = record["id"]
         file_path = record["source_file_path"]
 
+        # Verifica che il file sia effettivamente un PDF
+        if not file_path.lower().endswith(".pdf"):
+            print(f"-> Ignorato file non PDF: {file_path}")
+            continue
+
         print(
-            f"-> Elaborazione del file: {file_path} (ID Proposta: {proposal_id})"
+            f"-> Elaborazione del file PDF: {file_path} (ID Proposta: {proposal_id})"
         )
 
         try:
