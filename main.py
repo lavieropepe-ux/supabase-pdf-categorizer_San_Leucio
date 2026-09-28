@@ -1,9 +1,13 @@
+import logging
 import os
 from io import BytesIO
 from pypdf import PdfReader
 from supabase import create_client, Client
 
-# Recupera i segreti impostati su GitHub Actions / Ambiente
+# Silenzia i warning secondari di pypdf nei log di GitHub Actions
+logging.getLogger("pypdf").setLevel(logging.ERROR)
+
+# Recupera i segreti d'ambiente
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
@@ -36,7 +40,6 @@ def get_pdf_text_from_storage(file_path: str) -> str:
 
 def analyze_and_categorize(text: str) -> dict:
     """Analizza il testo del documento inerente al complesso di San Leucio
-
     e determina le informazioni spaziali ed edilizie.
     """
     text_lower = text.lower()
