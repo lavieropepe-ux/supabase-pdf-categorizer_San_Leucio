@@ -3,6 +3,7 @@ from io import BytesIO
 from pypdf import PdfReader
 from supabase import create_client, Client
 
+# Recupera i segreti impostati su GitHub Actions / Ambiente
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
@@ -35,6 +36,7 @@ def get_pdf_text_from_storage(file_path: str) -> str:
 
 def analyze_and_categorize(text: str) -> dict:
     """Analizza il testo del documento inerente al complesso di San Leucio
+
     e determina le informazioni spaziali ed edilizie.
     """
     text_lower = text.lower()
@@ -101,60 +103,66 @@ def analyze_and_categorize(text: str) -> dict:
 
 
 def process_pending_proposals():
-    # Recupera le proposte create dal trigger in stato 'to_review'
-    response = (
-        supabase.table(TARGET_TABLE)
-        .select("id, source_file_path")
-        .eq("review_status", "to_review")
-        .execute()
-    )
-    pending_records = response.data
+    # Elenca i file presenti direttamente nel bucket dello Storage
+    files = supabase.storage.from_(BUCKET_NAME).list()
 
-    if not pending_records:
-        print(
-            "Nessun documento in attesa di elaborazione (review_status = 'to_review')."
-        )
+    pdf_files = [f for f in files if f.get("name", "").lower().endswith(".pdf")]
+
+    if not pdf_files:
+        print("Nessun file PDF trovato nello Storage.")
         return
 
-    print(f"Trovate {len(pending_records)} proposte da elaborare.")
+    print(f"Trovati {len(pdf_files)} PDF nello Storage da verificare/elaborare.")
 
-    for record in pending_records:
-        proposal_id = record["id"]
-        file_path = record["source_file_path"]
+    for file_info in pdf_files:
+        file_path = file_info["name"]
 
-        # Verifica che il file sia effettivamente un PDF
-        if not file_path.lower().endswith(".pdf"):
-            print(f"-> Ignorato file non PDF: {file_path}")
-            continue
-
-        print(
-            f"-> Elaborazione del file PDF: {file_path} (ID Proposta: {proposal_id})"
+        # Cerca il record corrispondente nella tabella component_proposals
+        response = (
+            supabase.table(TARGET_TABLE)
+            .select("id, review_status")
+            .eq("source_file_path", file_path)
+            .execute()
         )
 
-        try:
-            # Estrazione e categorizzazione del testo
-            pdf_text = get_pdf_text_from_storage(file_path)
-            analysis = analyze_and_categorize(pdf_text)
+        if response.data:
+            proposal = response.data[0]
+            proposal_id = proposal["id"]
+            review_status = proposal.get("review_status")
 
-            # Aggiornamento del record esistente nella tabella
-            update_payload = {
-                "proposed_space_name": analysis["proposed_space_name"],
-                "space_category": analysis["space_category"],
-                "spatial_level": analysis["spatial_level"],
-                "ai_explanation": analysis["ai_explanation"],
-                "confidence": analysis["confidence"],
-                "review_status": "reviewed",
-            }
+            if review_status == "to_review":
+                print(
+                    f"-> Elaborazione del PDF: {file_path} (ID Proposta: {proposal_id})"
+                )
+                try:
+                    pdf_text = get_pdf_text_from_storage(file_path)
+                    analysis = analyze_and_categorize(pdf_text)
 
-            supabase.table(TARGET_TABLE).update(update_payload).eq(
-                "id", proposal_id
-            ).execute()
+                    update_payload = {
+                        "proposed_space_name": analysis["proposed_space_name"],
+                        "space_category": analysis["space_category"],
+                        "spatial_level": analysis["spatial_level"],
+                        "ai_explanation": analysis["ai_explanation"],
+                        "confidence": analysis["confidence"],
+                        "review_status": "reviewed",
+                    }
+
+                    supabase.table(TARGET_TABLE).update(update_payload).eq(
+                        "id", proposal_id
+                    ).execute()
+                    print(f"   [OK] Aggiornato record per: {file_path}")
+                except Exception as e:
+                    print(
+                        f"   [ERRORE] Impossibile elaborare il file {file_path}: {e}"
+                    )
+            else:
+                print(
+                    f"-> Gia' elaborato (stato '{review_status}'): {file_path}"
+                )
+        else:
             print(
-                f"   [OK] Aggiornata proposta {proposal_id} per il file: {file_path}"
+                f"-> Nessuna riga trovata in '{TARGET_TABLE}' per il file: {file_path}"
             )
-
-        except Exception as e:
-            print(f"   [ERRORE] Impossibile elaborare il file {file_path}: {e}")
 
 
 if __name__ == "__main__":
