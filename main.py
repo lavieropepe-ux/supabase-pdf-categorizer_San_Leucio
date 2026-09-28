@@ -5,40 +5,55 @@ from io import BytesIO
 from pypdf import PdfReader
 from supabase import create_client, Client
 
-# Silenzia i warning secondari di pypdf
 logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-    raise ValueError("Variabili d'ambiente SUPABASE_URL / KEY mancanti.")
+    raise ValueError("Variabili SUPABASE_URL / KEY mancanti.")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 BUCKET_NAME = "documents"
 TARGET_TABLE = "component_proposals"
 
-# Dizionario per il riconoscimento degli elementi costruttivi identitari
+# Vocabolario esteso per elementi costruttivi e architettonici
 CONSTRUCTIVE_ELEMENTS_VOCAB = {
-    "volta a botte": "Volte a botte",
-    "volta a padiglione": "Volte a padiglione",
-    "arco a tutto sesto": "Archi a tutto sesto",
-    "archi": "Archi e strutture voltate",
-    "muratura in tufo": "Muratura in tufo",
-    "mura perimetrali": "Mura perimetrali",
+    "volta": "Strutture voltate (volte)",
+    "volte": "Strutture voltate (volte)",
+    "botte": "Volta a botte",
+    "padiglione": "Volta a padiglione",
+    "arco": "Archi e aperture voltate",
+    "archi": "Archi e aperture voltate",
+    "muratura": "Muratura portante",
+    "mura": "Mura perimetrali",
+    "muro": "Mura perimetrali",
+    "pilastro": "Pilastri e elementi verticali",
+    "pilastri": "Pilastri e elementi verticali",
+    "colonna": "Colonnato / Colonne",
+    "colonne": "Colonnato / Colonne",
     "scalinata": "Scalinata monumentale",
     "scalone": "Scalone d'onore",
-    "trattaglio": "Macchinari per la trattura della seta (Trattagli)",
-    "telaio": "Telai di tessitura meccanica/manuale",
-    "vasca": "Vasche di immersione / Fontana",
-    "fontana": "Fontana monumentale",
-    "cortile": "Cortile pavimentato",
+    "scala": "Corpo scala",
+    "trattaglio": "Macchinari per la trattura (Trattagli)",
+    "trattagli": "Macchinari per la trattura (Trattagli)",
+    "telaio": "Telai di tessitura",
+    "telai": "Telai di tessitura",
+    "fontana": "Fontana / Basca d'acqua",
+    "fontane": "Fontana / Basca d'acqua",
+    "vasca": "Vasca di lavaggio/immersione",
+    "vasche": "Vasca di lavaggio/immersione",
+    "cortile": "Cortile interno / Chiostro",
+    "portico": "Porticato ad archi",
     "porticato": "Porticato ad archi",
-    "colonnato": "Colonnato strutturale",
-    "lesene": "Lesene e modanature di facciata",
+    "terrazzo": "Terrazza / Belvedere",
+    "terrazza": "Terrazza / Belvedere",
+    "facciata": "Facciata monumentale",
+    "prospetto": "Prospetto architettonico",
+    "acquedotto": "Acquedotto Carolino / Canalizzazioni",
+    "bagno": "Bagno di Maria Carolina / Vasche",
 }
 
-# Regole di categorizzazione spaziale
 CATEGORY_RULES = [
     {
         "name": "Belvedere - main hall",
@@ -50,6 +65,7 @@ CATEGORY_RULES = [
             "salone del belvedere",
             "gran salone",
             "sala del trono",
+            "salone",
         ],
         "confidence": 0.95,
     },
@@ -64,6 +80,8 @@ CATEGORY_RULES = [
             "fabbrica della seta",
             "arte della seta",
             "trattaglio",
+            "filanda",
+            "setificio",
         ],
         "confidence": 0.92,
     },
@@ -77,6 +95,7 @@ CATEGORY_RULES = [
             "residenza reale",
             "appartamento del re",
             "stanze reali",
+            "residenza",
         ],
         "confidence": 0.89,
     },
@@ -84,7 +103,6 @@ CATEGORY_RULES = [
 
 
 def extract_snippet(text: str, keyword: str) -> str:
-    """Estrae la frase contestuale che circonda la parola chiave."""
     clean_text = re.sub(r"\s+", " ", text)
     pattern = re.compile(
         r"([^.!?]*?\b" + re.escape(keyword) + r"\b[^.!?]*[.!?])", re.IGNORECASE
@@ -103,39 +121,28 @@ def extract_snippet(text: str, keyword: str) -> str:
     return "Estratto non disponibile."
 
 
-def detect_constructive_elements(text: str) -> str:
-    """Rileva la presenza di elementi costruttivi identitari nel testo della pagina."""
-    found_elements = set()
-    text_lower = text.lower()
-
-    for term, label in CONSTRUCTIVE_ELEMENTS_VOCAB.items():
-        if re.search(r"\b" + re.escape(term) + r"\b", text_lower):
-            found_elements.add(label)
-
-    if found_elements:
-        return ", ".join(sorted(found_elements))
-    return "Elementi costruttivi specifici non menzionati esplicitamente."
-
-
 def extract_and_analyze_pdf(file_path: str) -> dict:
     response = supabase.storage.from_(BUCKET_NAME).download(file_path)
     pdf_file = BytesIO(response)
     reader = PdfReader(pdf_file)
 
     page_scores = []
+    all_document_elements = set()
 
+    # Scansione dell'intero PDF per raccogliere TUTTI gli elementi costruttivi e trovare la categoria migliore
     for idx, page in enumerate(reader.pages):
         page_num = idx + 1
-
-        # Salta copertine/indici sintetici
-        if page_num < 3 and len(reader.pages) > 5:
-            continue
-
         text = page.extract_text() or ""
         text_lower = text.lower()
 
-        # Estrazione elementi costruttivi presenti nella pagina
-        constructive_elements = detect_constructive_elements(text)
+        # Rileva elementi costruttivi in tutto il documento
+        for term, label in CONSTRUCTIVE_ELEMENTS_VOCAB.items():
+            if re.search(r"\b" + re.escape(term) + r"\b", text_lower):
+                all_document_elements.add(label)
+
+        # Salta copertine per la scelta della categoria
+        if page_num < 3 and len(reader.pages) > 5:
+            continue
 
         for rule in CATEGORY_RULES:
             for kw in rule["keywords"]:
@@ -149,9 +156,15 @@ def extract_and_analyze_pdf(file_path: str) -> dict:
                             "keyword": kw,
                             "score": matches,
                             "snippet": snippet,
-                            "constructive_elements": constructive_elements,
                         }
                     )
+
+    # Stringa formattata degli elementi trovati
+    constructive_str = (
+        ", ".join(sorted(all_document_elements))
+        if all_document_elements
+        else "Nessun elemento costruttivo specifico identificato."
+    )
 
     if page_scores:
         best_match = max(page_scores, key=lambda x: x["score"])
@@ -162,11 +175,11 @@ def extract_and_analyze_pdf(file_path: str) -> dict:
             "proposed_space_name": rule["name"],
             "space_category": rule["category"],
             "spatial_level": rule["level"],
-            "ai_explanation": f"Identificato '{best_match['keyword']}' con alta rilevanza a pagina {page_str}.",
+            "ai_explanation": f"Identificato '{best_match['keyword']}' a pagina {page_str}.",
             "confidence": rule["confidence"],
             "source_page_number": page_str,
             "extracted_text_snippet": best_match["snippet"],
-            "constructive_elements": best_match["constructive_elements"],
+            "constructive_elements": constructive_str,
         }
 
     return {
@@ -177,7 +190,7 @@ def extract_and_analyze_pdf(file_path: str) -> dict:
         "confidence": 0.80,
         "source_page_number": None,
         "extracted_text_snippet": "Nessuna frase chiave rilevata nel testo.",
-        "constructive_elements": "Nessun elemento costruttivo identificato.",
+        "constructive_elements": constructive_str,
     }
 
 
@@ -205,7 +218,7 @@ def process_pending_proposals():
             review_status = proposal.get("review_status")
 
             if review_status == "to_review":
-                print(f"-> Analisi completa ed elementi costruttivi per: {file_path}")
+                print(f"-> Analisi estesa per: {file_path}")
                 try:
                     analysis = extract_and_analyze_pdf(file_path)
 
@@ -225,7 +238,7 @@ def process_pending_proposals():
                         "id", proposal_id
                     ).execute()
                     print(
-                        f"   [OK] Pagina: {analysis['source_page_number']} | Elementi: {analysis['constructive_elements']}"
+                        f"   [OK] Elementi trovati: {analysis['constructive_elements']}"
                     )
                 except Exception as e:
                     print(f"   [ERRORE] {file_path}: {e}")
