@@ -1,106 +1,133 @@
 import logging
 import os
+import re
 from io import BytesIO
 from pypdf import PdfReader
 from supabase import create_client, Client
 
-# Silenzia i warning secondari di pypdf nei log di GitHub Actions
 logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-    raise ValueError(
-        f"ERRORE: Variabili d'ambiente mancanti! "
-        f"SUPABASE_URL presente: {bool(SUPABASE_URL)}, "
-        f"SUPABASE_SERVICE_ROLE_KEY presente: {bool(SUPABASE_SERVICE_ROLE_KEY)}"
-    )
+    raise ValueError("Variabili d'ambiente SUPABASE_URL / KEY mancanti.")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-
 BUCKET_NAME = "documents"
 TARGET_TABLE = "component_proposals"
 
+# Dizionario con frasi chiave composte e punteggi specifici
+CATEGORY_RULES = [
+    {
+        "name": "Belvedere - main hall",
+        "category": "Cortile principale",
+        "level": "Primo piano",
+        "keywords": [
+            "salone reale",
+            "salone di rappresentanza",
+            "salone del belvedere",
+            "gran salone",
+            "sala del trono",
+        ],
+        "confidence": 0.95,
+    },
+    {
+        "name": "New silk factory / Belvedere",
+        "category": "Cortile principale",
+        "level": "Piano terra",
+        "keywords": [
+            "filanda reale",
+            "setificio di san leucio",
+            "opificio borbonico",
+            "fabbrica della seta",
+            "arte della seta",
+            "trattaglio",
+        ],
+        "confidence": 0.92,
+    },
+    {
+        "name": "Belvedere residential spaces",
+        "category": "Spazio aperto",
+        "level": "Primo piano",
+        "keywords": [
+            "quartiere san ferdinando",
+            "alloggi degli operai",
+            "residenza reale",
+            "appartamento del re",
+            "stanze reali",
+        ],
+        "confidence": 0.89,
+    },
+]
+
 
 def extract_and_analyze_pdf(file_path: str) -> dict:
-    """Scarica il PDF, analizza pagina per pagina ed individua la pagina esatta
-
-    in cui viene identificata la parola chiave.
-    """
     response = supabase.storage.from_(BUCKET_NAME).download(file_path)
     pdf_file = BytesIO(response)
     reader = PdfReader(pdf_file)
 
-    matched_page = None
-    best_analysis = {
+    page_scores = []
+
+    # Analizza ogni pagina e calcola la rilevanza
+    for idx, page in enumerate(reader.pages):
+        page_num = idx + 1
+
+        # Salta le prime 2 pagine per evitare solitamente copertine/indici sintetici
+        if page_num < 3 and len(reader.pages) > 5:
+            continue
+
+        text = page.extract_text() or ""
+        text_lower = text.lower()
+
+        for rule in CATEGORY_RULES:
+            for kw in rule["keywords"]:
+                # Conta quante volte compare la frase chiave nella pagina
+                matches = len(re.findall(r"\b" + re.escape(kw) + r"\b", text_lower))
+                if matches > 0:
+                    page_scores.append(
+                        {
+                            "page": str(page_num),
+                            "rule": rule,
+                            "keyword": kw,
+                            "score": matches,
+                        }
+                    )
+
+    # Se abbiamo trovato delle corrispondenze, prendiamo quella con il punteggio piu' alto
+    if page_scores:
+        # Ordina per punteggio decrescente
+        best_match = max(page_scores, key=lambda x: x["score"])
+        rule = best_match["rule"]
+        page_str = best_match["page"]
+
+        return {
+            "proposed_space_name": rule["name"],
+            "space_category": rule["category"],
+            "spatial_level": rule["level"],
+            "ai_explanation": f"Identificato '{best_match['keyword']}' con alta rilevanza a pagina {page_str}.",
+            "confidence": rule["confidence"],
+            "source_page_number": page_str,
+        }
+
+    # Se nessuna regola specifica e' stata attivata
+    return {
         "proposed_space_name": "Complesso Belvedere San Leucio",
         "space_category": "Spazio aperto",
         "spatial_level": "Piano terra",
-        "ai_explanation": "Analisi automatica completata (nessuna parola chiave specifica).",
-        "confidence": 0.85,
+        "ai_explanation": "Contenuto generale sul complesso monumentale senza riferimenti specifici ad ambienti identificati.",
+        "confidence": 0.80,
         "source_page_number": None,
     }
 
-    # Scansione pagina per pagina
-    for idx, page in enumerate(reader.pages):
-        page_num = str(idx + 1)
-        page_text = page.extract_text() or ""
-        text_lower = page_text.lower()
-
-        if (
-            "salone" in text_lower
-            or "main hall" in text_lower
-            or "rappresentanza" in text_lower
-        ):
-            return {
-                "proposed_space_name": "Belvedere - main hall",
-                "space_category": "Cortile principale",
-                "spatial_level": "Primo piano",
-                "ai_explanation": f"Identificato salone principale del complesso Belvedere a pagina {page_num}.",
-                "confidence": 0.95,
-                "source_page_number": page_num,
-            }
-
-        elif any(
-            k in text_lower
-            for k in ["setificio", "filanda", "fabbrica", "opificio"]
-        ):
-            return {
-                "proposed_space_name": "New silk factory / Belvedere",
-                "space_category": "Cortile principale",
-                "spatial_level": "Piano terra",
-                "ai_explanation": f"Identificata area produttiva della filanda a pagina {page_num}.",
-                "confidence": 0.92,
-                "source_page_number": page_num,
-            }
-
-        elif any(
-            k in text_lower for k in ["residenza", "alloggio", "appartamento"]
-        ):
-            return {
-                "proposed_space_name": "Belvedere residential spaces",
-                "space_category": "Spazio aperto",
-                "spatial_level": "Primo piano",
-                "ai_explanation": f"Rilevati riferimenti agli ambienti residenziali a pagina {page_num}.",
-                "confidence": 0.89,
-                "source_page_number": page_num,
-            }
-
-    return best_analysis
-
 
 def process_pending_proposals():
-    # Elenca i file presenti nello Storage
     files = supabase.storage.from_(BUCKET_NAME).list()
-
     pdf_files = [f for f in files if f.get("name", "").lower().endswith(".pdf")]
 
     if not pdf_files:
-        print("Nessun file PDF trovato nello Storage.")
+        print("Nessun PDF nello Storage.")
         return
-
-    print(f"Trovati {len(pdf_files)} PDF nello Storage da verificare/elaborare.")
 
     for file_info in pdf_files:
         file_path = file_info["name"]
@@ -118,13 +145,10 @@ def process_pending_proposals():
             review_status = proposal.get("review_status")
 
             if review_status == "to_review":
-                print(
-                    f"-> Elaborazione del PDF: {file_path} (ID Proposta: {proposal_id})"
-                )
+                print(f"-> Analisi avanzata PDF: {file_path}")
                 try:
                     analysis = extract_and_analyze_pdf(file_path)
 
-                    # Includiamo 'source_page_number' nel payload di aggiornamento
                     update_payload = {
                         "proposed_space_name": analysis["proposed_space_name"],
                         "space_category": analysis["space_category"],
@@ -139,20 +163,10 @@ def process_pending_proposals():
                         "id", proposal_id
                     ).execute()
                     print(
-                        f"   [OK] Aggiornato record e pagina ({analysis['source_page_number']}) per: {file_path}"
+                        f"   [OK] Pagina individuata: {analysis['source_page_number']} | Categoria: {analysis['proposed_space_name']}"
                     )
                 except Exception as e:
-                    print(
-                        f"   [ERRORE] Impossibile elaborare il file {file_path}: {e}"
-                    )
-            else:
-                print(
-                    f"-> Gia' elaborato (stato '{review_status}'): {file_path}"
-                )
-        else:
-            print(
-                f"-> Nessuna riga trovata in '{TARGET_TABLE}' per il file: {file_path}"
-            )
+                    print(f"   [ERRORE] {file_path}: {e}")
 
 
 if __name__ == "__main__":
