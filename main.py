@@ -18,7 +18,27 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 BUCKET_NAME = "documents"
 TARGET_TABLE = "component_proposals"
 
-# Regole di categorizzazione e frasi chiave
+# Dizionario per il riconoscimento degli elementi costruttivi identitari
+CONSTRUCTIVE_ELEMENTS_VOCAB = {
+    "volta a botte": "Volte a botte",
+    "volta a padiglione": "Volte a padiglione",
+    "arco a tutto sesto": "Archi a tutto sesto",
+    "archi": "Archi e strutture voltate",
+    "muratura in tufo": "Muratura in tufo",
+    "mura perimetrali": "Mura perimetrali",
+    "scalinata": "Scalinata monumentale",
+    "scalone": "Scalone d'onore",
+    "trattaglio": "Macchinari per la trattura della seta (Trattagli)",
+    "telaio": "Telai di tessitura meccanica/manuale",
+    "vasca": "Vasche di immersione / Fontana",
+    "fontana": "Fontana monumentale",
+    "cortile": "Cortile pavimentato",
+    "porticato": "Porticato ad archi",
+    "colonnato": "Colonnato strutturale",
+    "lesene": "Lesene e modanature di facciata",
+}
+
+# Regole di categorizzazione spaziale
 CATEGORY_RULES = [
     {
         "name": "Belvedere - main hall",
@@ -63,9 +83,8 @@ CATEGORY_RULES = [
 ]
 
 
-def extract_snippet(text: str, keyword: str, max_words: int = 40) -> str:
-    """Estrae il contesto/frase esatta che circonda la parola chiave identificata."""
-    # Pulizia di spazi multipli e a capo
+def extract_snippet(text: str, keyword: str) -> str:
+    """Estrae la frase contestuale che circonda la parola chiave."""
     clean_text = re.sub(r"\s+", " ", text)
     pattern = re.compile(
         r"([^.!?]*?\b" + re.escape(keyword) + r"\b[^.!?]*[.!?])", re.IGNORECASE
@@ -73,10 +92,8 @@ def extract_snippet(text: str, keyword: str, max_words: int = 40) -> str:
     match = pattern.search(clean_text)
 
     if match:
-        snippet = match.group(0).strip()
-        return snippet
+        return match.group(0).strip()
 
-    # Fallback: se non trova la punteggiatura di fine frase, prende una porzione di testo attorno
     idx = clean_text.lower().find(keyword.lower())
     if idx != -1:
         start = max(0, idx - 100)
@@ -84,6 +101,20 @@ def extract_snippet(text: str, keyword: str, max_words: int = 40) -> str:
         return f"...{clean_text[start:end].strip()}..."
 
     return "Estratto non disponibile."
+
+
+def detect_constructive_elements(text: str) -> str:
+    """Rileva la presenza di elementi costruttivi identitari nel testo della pagina."""
+    found_elements = set()
+    text_lower = text.lower()
+
+    for term, label in CONSTRUCTIVE_ELEMENTS_VOCAB.items():
+        if re.search(r"\b" + re.escape(term) + r"\b", text_lower):
+            found_elements.add(label)
+
+    if found_elements:
+        return ", ".join(sorted(found_elements))
+    return "Elementi costruttivi specifici non menzionati esplicitamente."
 
 
 def extract_and_analyze_pdf(file_path: str) -> dict:
@@ -96,12 +127,15 @@ def extract_and_analyze_pdf(file_path: str) -> dict:
     for idx, page in enumerate(reader.pages):
         page_num = idx + 1
 
-        # Salta le prime 2 pagine per evitare solitamente copertine/indici
+        # Salta copertine/indici sintetici
         if page_num < 3 and len(reader.pages) > 5:
             continue
 
         text = page.extract_text() or ""
         text_lower = text.lower()
+
+        # Estrazione elementi costruttivi presenti nella pagina
+        constructive_elements = detect_constructive_elements(text)
 
         for rule in CATEGORY_RULES:
             for kw in rule["keywords"]:
@@ -115,15 +149,14 @@ def extract_and_analyze_pdf(file_path: str) -> dict:
                             "keyword": kw,
                             "score": matches,
                             "snippet": snippet,
+                            "constructive_elements": constructive_elements,
                         }
                     )
 
     if page_scores:
-        # Seleziona il match con il punteggio/frequenza piu' alto
         best_match = max(page_scores, key=lambda x: x["score"])
         rule = best_match["rule"]
         page_str = best_match["page"]
-        snippet_str = best_match["snippet"]
 
         return {
             "proposed_space_name": rule["name"],
@@ -132,17 +165,19 @@ def extract_and_analyze_pdf(file_path: str) -> dict:
             "ai_explanation": f"Identificato '{best_match['keyword']}' con alta rilevanza a pagina {page_str}.",
             "confidence": rule["confidence"],
             "source_page_number": page_str,
-            "extracted_text_snippet": snippet_str,
+            "extracted_text_snippet": best_match["snippet"],
+            "constructive_elements": best_match["constructive_elements"],
         }
 
     return {
         "proposed_space_name": "Complesso Belvedere San Leucio",
         "space_category": "Spazio aperto",
         "spatial_level": "Piano terra",
-        "ai_explanation": "Contenuto generale sul complesso monumentale senza riferimenti specifici ad ambienti identificati.",
+        "ai_explanation": "Contenuto generale sul complesso monumentale.",
         "confidence": 0.80,
         "source_page_number": None,
         "extracted_text_snippet": "Nessuna frase chiave rilevata nel testo.",
+        "constructive_elements": "Nessun elemento costruttivo identificato.",
     }
 
 
@@ -170,7 +205,7 @@ def process_pending_proposals():
             review_status = proposal.get("review_status")
 
             if review_status == "to_review":
-                print(f"-> Estrazione testo ed evidenze per: {file_path}")
+                print(f"-> Analisi completa ed elementi costruttivi per: {file_path}")
                 try:
                     analysis = extract_and_analyze_pdf(file_path)
 
@@ -182,6 +217,7 @@ def process_pending_proposals():
                         "confidence": analysis["confidence"],
                         "source_page_number": analysis["source_page_number"],
                         "extracted_text_snippet": analysis["extracted_text_snippet"],
+                        "constructive_elements": analysis["constructive_elements"],
                         "review_status": "reviewed",
                     }
 
@@ -189,7 +225,7 @@ def process_pending_proposals():
                         "id", proposal_id
                     ).execute()
                     print(
-                        f"   [OK] Pagina: {analysis['source_page_number']} | Snippet: \"{analysis['extracted_text_snippet'][:60]}...\""
+                        f"   [OK] Pagina: {analysis['source_page_number']} | Elementi: {analysis['constructive_elements']}"
                     )
                 except Exception as e:
                     print(f"   [ERRORE] {file_path}: {e}")
